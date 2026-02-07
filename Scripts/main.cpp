@@ -1,4 +1,5 @@
-﻿#include <winsock2.h>
+﻿#define _USE_MATH_DEFINES
+#include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <d3d11.h>
@@ -17,6 +18,13 @@
 #include <map>
 #include <algorithm>
 
+#include <iostream>
+#include <fmod.hpp>
+#include <fmod_errors.h>
+#include <cmath>
+#include <conio.h>
+
+#pragma comment(lib, "fmod_vc.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "d3d11.lib")
 
@@ -149,6 +157,7 @@ static std::vector<OnlineUser> g_onlineUsers;
 static std::mutex g_usersMutex;
 static std::map<int, PrivateChatWindow> g_privateChats; //Key: (int)id
 static std::mutex g_privateChatsMutex;
+static std::mutex g_privateChatsWindowMutex;
 static std::string g_selectedUserId; //Currently selected user ID
 
 //Broadcast queue
@@ -164,12 +173,117 @@ static bool g_SwapChainOccluded = false;
 static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
-bool starting = { false };
+static bool starting = { false };
+
+static std::atomic<bool> soundEffect = { true };
+static bool hasBGM = { true };
 
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
+
+//--------------------------------------------------------------------------------------------------
+//Fmod
+FMOD_RESULT F_CALLBACK sineCallback(FMOD_DSP_STATE* dsp_state, float* inbuffer, float* outbuffer, unsigned int length, int
+    inchannels, int* outchannels)
+{
+    static float phase = 0.0f;
+    const float frequency = 440.0f;
+    const float sampleRate = 48000.0f;
+    for (unsigned int i = 0; i < length; i++) {
+        float sample = sinf(phase);
+        phase += 2.0f * M_PI * frequency / sampleRate;
+        if (phase >= 2.0f * M_PI) {
+            phase -= 2.0f * M_PI;
+        }
+        for (int j = 0; j < *outchannels; j++) {
+            outbuffer[i * (*outchannels) + j] = sample;
+        }
+    }
+    return FMOD_OK;
+}
+void sineWave() {
+    FMOD::System* system;
+    FMOD::System_Create(&system);
+    system->init(128, FMOD_INIT_NORMAL, NULL);
+    FMOD_DSP_DESCRIPTION dspDesc = {};
+    dspDesc.version = 0x00010000;
+    dspDesc.numinputbuffers = 0;
+    dspDesc.numoutputbuffers = 1;
+    dspDesc.read = sineCallback;
+    FMOD::DSP* dsp;
+    system->createDSP(&dspDesc, &dsp);
+    system->playDSP(dsp, NULL, false, NULL);
+    auto start = std::chrono::steady_clock::now();
+    while (true) 
+    {
+        if (!soundEffect) {
+            break;
+        }
+        system->update();
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+        if (elapsed >= 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    dsp->release();
+    system->close();
+    system->release();
+}
+void playMusic(std::string musicName)
+{
+    FMOD::System* system;
+    FMOD::System_Create(&system);
+    system->init(128, FMOD_INIT_NORMAL, NULL);
+    FMOD::Sound* sound = NULL;
+    FMOD::Channel* channel = NULL;
+    system->createSound((musicName + ".mp3").c_str(), FMOD_DEFAULT, NULL, &sound);
+    system->playSound(sound, NULL, false, &channel);
+    auto start = std::chrono::steady_clock::now();
+    while (true)
+    {
+        if (!soundEffect) {
+            break;
+        }
+        system->update();
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+        if (elapsed >= 3) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    sound->release();
+    system->close();
+    system->release();
+}
+void playBGM(std::string musicName)
+{
+    FMOD::System* system;
+    FMOD::System_Create(&system);
+    system->init(128, FMOD_INIT_NORMAL, NULL);
+    FMOD::Sound* sound = NULL;
+    FMOD::Channel* channel = NULL;
+    system->createSound((musicName + ".mp3").c_str(), FMOD_LOOP_NORMAL, NULL, &sound);
+    system->playSound(sound, NULL, false, &channel);
+    auto start = std::chrono::steady_clock::now();
+    while (true)
+    {
+        if (hasBGM) {
+            channel->setPaused(false);
+        }
+        else
+        {
+            channel->setPaused(true);
+        }
+        if (!soundEffect) {
+            break;
+        }
+    }
+    sound->release();
+    system->close();
+    system->release();
+}
+
 //------------------------------------------------------------------------
 
 std::string GetCurrentTimeStr() {
@@ -206,6 +320,9 @@ void AddMessage(const std::string& sender, const std::string& content, bool isSe
         g_messages.erase(g_messages.begin());
     }
     g_messages.push_back(ChatMessage(sender, content, GetCurrentTimeStr(), isSelf, isSystem, isPrivate, recipient, recipientID));
+    if (!isSelf&&!isSystem) {
+        std::thread(sineWave).detach();
+    }
     if (!isPrivate) g_scrollToBottom = true;
 }
 
@@ -219,6 +336,10 @@ void AddPrivateMessage(const int windowKey, const std::string& sender, const std
         }
         it->second.messages.push_back(ChatMessage(sender, content, GetCurrentTimeStr(), isSelf, false, true, it->second.targetUser,std::stoi(it->second.targetId)));
         it->second.scrollToBottom = true;
+        if (!isSelf) {
+            it->second.hasNewMessage = true;
+            std::thread(playMusic, "Sounds/mg").detach();
+        }
     }
 }
 
@@ -231,6 +352,7 @@ PrivateChatWindow* GetOrCreatePrivateChat(const std::string& userName, const std
         auto result =
             g_privateChats.emplace(key, PrivateChatWindow(userName, userId));
         if (result.second) {
+            result.first->second.isOpen = true;
             return &(result.first->second);
         }
         return NULL;
@@ -260,7 +382,15 @@ void BroadcastMessageToAll(const std::string& content, int senderId, const std::
     g_broadcastQueue.push(BroadcastMessage(content, senderId, senderName, isSystem, isPrivate, targetId));
     g_broadcastCV.notify_one();
 }
-
+void UpdateServerOnlineUserList() {
+    g_onlineUsers.push_back(OnlineUser(g_nickname, "0", g_serverIP));
+    for (int i = 0; i < g_network.clients.size(); i++) {
+        std::unique_ptr<ClientConnection>& client = g_network.clients[i];
+        if (client && client->active) {
+            g_onlineUsers.push_back(OnlineUser(client->name, std::to_string(client->id), client->ip));
+        }
+    }
+}
 void BroadcastUserList() {
     if (g_network.type != ClientType::SERVER || !g_network.isRunning) return;
 
@@ -278,6 +408,7 @@ void BroadcastUserList() {
             userListMsg += client->name + "#" + std::to_string(client->id) + "#" + client->ip;
         }
     }
+    UpdateServerOnlineUserList();
     BroadcastMessageToAll(userListMsg, 0, "System", true);
 }
 
@@ -398,13 +529,15 @@ void HandleClient(ClientConnection* client) {
                 if (closeBracket != std::string::npos && closeBracket > 2) {
                     std::string targetIdStr = msg.substr(2, closeBracket - 2);
                     int targetId = std::stoi(targetIdStr);
-                    std::string content = msg.substr(closeBracket + 1);
-
-                    BroadcastMessageToAll(content, client->id, client->name,false, true, targetId);
+                    std::string content = msg.substr(closeBracket + 1);                  
 
                     if (targetId == 0) {
-                        AddMessage("[" + std::to_string(client->id) + "]" + client->name,
-                            "[@"+std::string(g_nickname)+"]" + content, false, false, true);
+                        PrivateChatWindow* chat = GetOrCreatePrivateChat(client->name, std::to_string(client->id));
+                        AddPrivateMessage(client->id,client->name,content,false);
+                    }
+                    else
+                    {
+                        BroadcastMessageToAll(content, client->id, client->name, false, true, targetId);
                     }
                     continue;
                 }
@@ -571,7 +704,7 @@ void StartServer() {
         AddMessage("System", "Waiting for clients...", false, true);
 
         std::thread broadcastThread(BroadcastWorker);
-
+        UpdateServerOnlineUserList();
         AcceptLoop();
 
         g_network.shouldClose = true;
@@ -887,7 +1020,6 @@ bool SendPrivateMessage(const std::string& targetId, const std::string& content)
     }
     else if (g_network.type == ClientType::SERVER) {
         if (tid == 0) {
-            AddMessage("[Server]" + std::string(g_nickname), content, true, false, true);
             return true;
         }
         else {
@@ -949,16 +1081,21 @@ void DrawUserListPanel(float width, float height) {
 }
 
 void DrawPrivateChatWindows() {
-    std::lock_guard<std::mutex> lock(g_privateChatsMutex);
+    std::lock_guard<std::mutex> lock(g_privateChatsWindowMutex);
     std::vector<int> toRemove;
 
     for (auto it = g_privateChats.begin();
-        it != g_privateChats.end(); ++it) {
+        it != g_privateChats.end(); it++) {
         const int key = it->first;
         PrivateChatWindow& chat = it->second;
 
-        if (!chat.isOpen) {
+        auto user = std::find_if(g_onlineUsers.begin(), g_onlineUsers.end(),
+            [key](const OnlineUser& olu) { return std::stoi(olu.id) == key;});
+        if (user == g_onlineUsers.end()) {
             toRemove.push_back(key);
+            continue;
+        }
+        if (!chat.isOpen) {
             continue;
         }
 
@@ -1003,8 +1140,14 @@ void DrawPrivateChatWindows() {
 
             if ((enterPressed || btnClicked) && strlen(chat.inputBuffer) > 0) {
                 std::string content(chat.inputBuffer);
-                if (SendPrivateMessage(chat.targetId, content)) {
-                    //AddPrivateMessage(std::stoi(chat.targetId), "Me" + std::string(g_nickname), content, true);
+                if (std::stoi(chat.targetId)!= g_network.myid) {
+                    if (SendPrivateMessage(chat.targetId, content)) {
+                        AddPrivateMessage(key, "[Me]" + std::string(g_nickname), content, true);
+                    }
+                }
+                else
+                {
+                    AddPrivateMessage(key, "[Me]" + std::string(g_nickname), content, true);
                 }
                 chat.inputBuffer[0] = '\0';
                 ImGui::SetKeyboardFocusHere(-1);
@@ -1063,7 +1206,7 @@ void DrawUI() {
     ImGui::Separator();
 
     if (g_network.connected || g_network.isRunning) {
-        ImGui::Text("Mode: %s | Nick: %s[%d]",
+        ImGui::Text("Mode: %s | Nickname: %s | ID: [%d]",
             g_network.type == ClientType::SERVER ? "Server" : "Client",
             g_nickname,g_network.myid);
 
@@ -1075,6 +1218,8 @@ void DrawUI() {
         if (ImGui::Button("Disconnect", ImVec2(80, 20))) {
             Disconnect();
         }
+        ImGui::SameLine();
+        ImGui::Checkbox("BGM", &hasBGM);
     }
     else {
         ImGui::InputText("Nickname", g_nickname, sizeof(g_nickname));
@@ -1088,7 +1233,9 @@ void DrawUI() {
             if (ImGui::Button("Host Server", ImVec2(80, 20))) {
                 StartServer();
             }
-        }       
+        }  
+        ImGui::SameLine();
+        ImGui::Checkbox("BGM", &hasBGM);
     }
     ImGui::EndChild();
 
@@ -1160,7 +1307,7 @@ void DrawUI() {
     }
 
     ImGui::PopStyleVar();
-    ImGui::TextDisabled("Commands: !name <Nick> = Change name | !list = Check user list | !quit = Exit");
+    ImGui::TextDisabled("Commands: !name <Nickname> = Change name | !list = Check user list | !quit = Exit");
 
     ImGui::End();
 
@@ -1244,6 +1391,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 //----------------------------------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    std::thread(playBGM, "Sounds/bgm").detach();
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         MessageBoxA(nullptr, "WinSock initialization failed", "Error", MB_OK);
@@ -1325,7 +1473,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     Disconnect();
-
+    soundEffect = false;
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
