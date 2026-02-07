@@ -173,10 +173,12 @@ static bool g_SwapChainOccluded = false;
 static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
-static bool starting = { false };
-static std::atomic<bool> systemRunning = { true };
-static bool soundEffect = { true };
-static bool hasBGM = { true };
+static bool g_starting = { false };
+static std::atomic<bool> g_systemRunning = { true };
+static bool g_soundEffect = { true };
+static bool g_hasBGM = { true };
+static std::queue<std::thread> g_sounds;
+static std::thread g_bgm;
 
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
@@ -204,7 +206,7 @@ FMOD_RESULT F_CALLBACK sineCallback(FMOD_DSP_STATE* dsp_state, float* inbuffer, 
     return FMOD_OK;
 }
 void sineWave() {
-    if (!soundEffect) {
+    if (!g_soundEffect) {
         return;
     }
     FMOD::System* system;
@@ -221,7 +223,10 @@ void sineWave() {
     auto start = std::chrono::steady_clock::now();
     while (true) 
     {
-        if (!systemRunning) {
+        if (!g_soundEffect) {
+            break;
+        }
+        if (!g_systemRunning) {
             break;
         }
         system->update();
@@ -236,7 +241,7 @@ void sineWave() {
 }
 void playMusic(std::string musicName)
 {
-    if (!soundEffect) {
+    if (!g_soundEffect) {
         return;
     }
     FMOD::System* system;
@@ -249,7 +254,10 @@ void playMusic(std::string musicName)
     auto start = std::chrono::steady_clock::now();
     while (true)
     {
-        if (!systemRunning) {
+        if (!g_soundEffect) {
+            break;
+        }
+        if (!g_systemRunning) {
             break;
         }
         system->update();
@@ -274,14 +282,14 @@ void playBGM(std::string musicName)
     auto start = std::chrono::steady_clock::now();
     while (true)
     {
-        if (hasBGM) {
+        if (g_hasBGM) {
             channel->setPaused(false);
         }
         else
         {
             channel->setPaused(true);
         }
-        if (!systemRunning) {
+        if (!g_systemRunning) {
             break;
         }
     }
@@ -289,7 +297,19 @@ void playBGM(std::string musicName)
     system->close();
     system->release();
 }
-
+void ResizeSoundsQueue() {
+    if (g_sounds.size() > 5) {
+        bool soundEffect = g_soundEffect;
+        g_soundEffect = false;
+        while (!g_sounds.empty())
+        {
+            std::thread& s = g_sounds.front();
+            s.join();
+            g_sounds.pop();
+        }
+        g_soundEffect = soundEffect;
+    }   
+}
 //------------------------------------------------------------------------
 
 std::string GetCurrentTimeStr() {
@@ -327,7 +347,8 @@ void AddMessage(const std::string& sender, const std::string& content, bool isSe
     }
     g_messages.push_back(ChatMessage(sender, content, GetCurrentTimeStr(), isSelf, isSystem, isPrivate, recipient, recipientID));
     if (!isSelf&&!isSystem) {
-        std::thread(sineWave).detach();
+        ResizeSoundsQueue();
+        g_sounds.push(std::thread(sineWave));
     }
     if (!isPrivate) g_scrollToBottom = true;
 }
@@ -344,7 +365,9 @@ void AddPrivateMessage(const int windowKey, const std::string& sender, const std
         it->second.scrollToBottom = true;
         if (!isSelf) {
             it->second.hasNewMessage = true;
-            std::thread(playMusic, "Sounds/mg").detach();
+            ResizeSoundsQueue();
+            g_sounds.push(std::thread(playMusic, "Sounds/mg"));
+     
         }
     }
 }
@@ -700,7 +723,7 @@ void StartServer() {
 
         listen(g_network.listenSocket, SOMAXCONN);
         g_network.localIP = "[::]:8080";
-        g_network.status = "Running (0 clients)";
+        g_network.status = "Server Is Running: "+std::string(g_serverIP);
         g_network.shouldClose = false;
         g_network.connected = true;
         g_network.isRunning = true;
@@ -960,7 +983,7 @@ void StartClient(const std::string& ip) {
         freeaddrinfo(result);
         g_network.status = "Connection failed";
         AddMessage("System", "Failed to connect to: " + ip, false, true);
-        starting = false;
+        g_starting = false;
         }).detach();
 }
 
@@ -1225,27 +1248,27 @@ void DrawUI() {
             Disconnect();
         }
         ImGui::SameLine();
-        ImGui::Checkbox("BGM", &hasBGM);
+        ImGui::Checkbox("BGM", &g_hasBGM);
         ImGui::SameLine();
-        ImGui::Checkbox("SoundEffect", &soundEffect);
+        ImGui::Checkbox("SoundEffect", &g_soundEffect);
     }
     else {
         ImGui::InputText("Nickname", g_nickname, sizeof(g_nickname));
         ImGui::InputText("Server IP", g_serverIP, sizeof(g_serverIP));
         if (ImGui::Button("Connect", ImVec2(80, 20))) {
-            starting = true;
+            g_starting = true;
             StartClient(g_serverIP);
         }
         ImGui::SameLine();
-        if (!starting) {
+        if (!g_starting) {
             if (ImGui::Button("Host Server", ImVec2(80, 20))) {
                 StartServer();
             }
         }  
         ImGui::SameLine();
-        ImGui::Checkbox("BGM", &hasBGM);
+        ImGui::Checkbox("BGM", &g_hasBGM);
         ImGui::SameLine();
-        ImGui::Checkbox("SoundEffect", &soundEffect);
+        ImGui::Checkbox("SoundEffect", &g_soundEffect);
     }
     ImGui::EndChild();
 
@@ -1401,7 +1424,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 //----------------------------------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    std::thread(playBGM, "Sounds/bgm").detach();
+    g_bgm = std::thread(playBGM, "Sounds/bgm");
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         MessageBoxA(nullptr, "WinSock initialization failed", "Error", MB_OK);
@@ -1483,8 +1506,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     Disconnect();
-    systemRunning = false;
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    g_systemRunning = false;
+    g_bgm.join();
+    while (!g_sounds.empty())
+    {
+        std::thread& s = g_sounds.front(); 
+        s.join();
+        g_sounds.pop();
+    }
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
