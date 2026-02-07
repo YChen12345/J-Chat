@@ -174,8 +174,8 @@ static UINT g_ResizeWidth = 0, g_ResizeHeight = 0;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 
 static bool starting = { false };
-
-static std::atomic<bool> soundEffect = { true };
+static std::atomic<bool> systemRunning = { true };
+static bool soundEffect = { true };
 static bool hasBGM = { true };
 
 bool CreateDeviceD3D(HWND hWnd);
@@ -204,6 +204,9 @@ FMOD_RESULT F_CALLBACK sineCallback(FMOD_DSP_STATE* dsp_state, float* inbuffer, 
     return FMOD_OK;
 }
 void sineWave() {
+    if (!soundEffect) {
+        return;
+    }
     FMOD::System* system;
     FMOD::System_Create(&system);
     system->init(128, FMOD_INIT_NORMAL, NULL);
@@ -218,7 +221,7 @@ void sineWave() {
     auto start = std::chrono::steady_clock::now();
     while (true) 
     {
-        if (!soundEffect) {
+        if (!systemRunning) {
             break;
         }
         system->update();
@@ -233,6 +236,9 @@ void sineWave() {
 }
 void playMusic(std::string musicName)
 {
+    if (!soundEffect) {
+        return;
+    }
     FMOD::System* system;
     FMOD::System_Create(&system);
     system->init(128, FMOD_INIT_NORMAL, NULL);
@@ -243,7 +249,7 @@ void playMusic(std::string musicName)
     auto start = std::chrono::steady_clock::now();
     while (true)
     {
-        if (!soundEffect) {
+        if (!systemRunning) {
             break;
         }
         system->update();
@@ -275,7 +281,7 @@ void playBGM(std::string musicName)
         {
             channel->setPaused(true);
         }
-        if (!soundEffect) {
+        if (!systemRunning) {
             break;
         }
     }
@@ -1220,6 +1226,8 @@ void DrawUI() {
         }
         ImGui::SameLine();
         ImGui::Checkbox("BGM", &hasBGM);
+        ImGui::SameLine();
+        ImGui::Checkbox("SoundEffect", &soundEffect);
     }
     else {
         ImGui::InputText("Nickname", g_nickname, sizeof(g_nickname));
@@ -1236,6 +1244,8 @@ void DrawUI() {
         }  
         ImGui::SameLine();
         ImGui::Checkbox("BGM", &hasBGM);
+        ImGui::SameLine();
+        ImGui::Checkbox("SoundEffect", &soundEffect);
     }
     ImGui::EndChild();
 
@@ -1473,7 +1483,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     Disconnect();
-    soundEffect = false;
+    systemRunning = false;
     std::this_thread::sleep_for(std::chrono::seconds(3));
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
