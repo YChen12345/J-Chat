@@ -39,6 +39,12 @@
     <ClInclude Include="Scripts\imgui_impl_dx11.h">
       <Filter>Resource Files</Filter>
     </ClInclude>
+    <ClInclude Include="Scripts\json.h">
+      <Filter>Resource Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Scripts\httpClient.h">
+      <Filter>Resource Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Scripts\imgui_impl_win32.cpp">

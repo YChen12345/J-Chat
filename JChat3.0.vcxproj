@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Scripts\httpClient.h" />
     <ClInclude Include="Scripts\imconfig.h" />
     <ClInclude Include="Scripts\imgui.h" />
     <ClInclude Include="Scripts\imgui_impl_dx11.h" />
@@ -27,6 +28,7 @@
     <ClInclude Include="Scripts\imstb_rectpack.h" />
     <ClInclude Include="Scripts\imstb_textedit.h" />
     <ClInclude Include="Scripts\imstb_truetype.h" />
+    <ClInclude Include="Scripts\json.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Scripts\imgui.cpp" />

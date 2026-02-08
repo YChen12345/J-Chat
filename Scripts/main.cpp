@@ -32,6 +32,9 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 
+#include "json.h"
+#include "httpClient.h"
+
 #define DEFAULT_PORT "8080"
 #define MAX_MESSAGES 200
 #define MAX_CLIENTS 10
@@ -141,9 +144,51 @@ struct BroadcastMessage {
         : content(c), senderId(sid), senderName(sname), isPrivate(priv), isSystem(isSys), targetId(tid) {
     }
 };
+//-----------------------------------------------------------------------------------------------------------------------------------------
+//Groq AI
+class GroqAI {
+private:
+    std::string apiKey_;
+    std::string model_;
+    std::string host_;
+    std::vector<std::pair<std::string, std::string>> messages_;
+
+public:
+    GroqAI(const std::string& apiKey,const std::string& model): apiKey_(apiKey), model_(model), host_("api.groq.com") {
+        messages_.push_back({ "system", "You are the AI assistant of this chat room. your name is J-AI." });
+    }
+
+    std::string send(const std::string& userMessage) {
+        messages_.push_back({ "user", userMessage });
+
+        std::string jsonBody = Json::buildChatRequest(model_, messages_);
+
+        std::vector<std::pair<std::string, std::string>> headers = {
+            {"Content-Type", "application/json"},
+            {"Authorization", "Bearer " + apiKey_}
+        };
+
+        std::string response = HttpClient::post(host_, "/openai/v1/chat/completions", headers, jsonBody, 60);
+        std::string content = Json::extractContent(response);
+        messages_.push_back({ "assistant", content });
+
+        return content;
+    }
+
+    void clear() {
+        auto sys = messages_[0];
+        messages_.clear();
+        messages_.push_back(sys);
+    }
+};
 
 //------------------------------------------------------------------------
+static std::atomic<bool> g_aiActive = { false };
+static std::string g_aiApiKey = "";
+static std::string g_aiModel = "llama-3.3-70b-versatile";
+static GroqAI g_aiAgent(g_aiApiKey,g_aiModel);
 
+//
 static NetworkState g_network;
 static std::vector<ChatMessage> g_messages;//Record chat message
 static std::mutex g_msgMutex;
@@ -473,6 +518,9 @@ void BroadcastWorker() {
             else if (msg.isSystem) {
                 formattedMsg = "[System]" + msg.content;
             }
+            else if (msg.senderId == 0&&msg.senderName=="J-AI") {
+                formattedMsg = "[AI][" + std::to_string(msg.senderId) + "]" + msg.senderName + ": " + msg.content;
+            }
             else if (msg.senderId == 0) {
                 formattedMsg = "[Server][" + std::to_string(msg.senderId) + "]" + msg.senderName + ": " + msg.content;
             }
@@ -503,6 +551,75 @@ void BroadcastWorker() {
             }
             lock.lock();
         }
+    }
+}
+//---------------------------------------------------------------------------------------
+bool SendNetworkMessage(const std::string& content) {
+    if (!g_network.connected) return false;
+
+    if (g_network.type == ClientType::CLIENT) {
+        return SendMsg(g_network.clientSocket, content);
+    }
+    else if (g_network.type == ClientType::SERVER) {
+        AddMessage("[Server]" + std::string(g_nickname), content, true);
+        BroadcastMessageToAll(content, 0, g_nickname);
+        return true;
+    }
+    return false;
+}
+
+bool SendPrivateMessage(const std::string& targetId, const std::string& content) {
+    if (!g_network.connected) return false;
+
+    int tid = 0;
+    tid = std::stoi(targetId);
+
+    std::string msg = "@[" + std::to_string(tid) + "]" + content;
+
+    if (g_network.type == ClientType::CLIENT) {
+        return SendMsg(g_network.clientSocket, msg);
+    }
+    else if (g_network.type == ClientType::SERVER) {
+        if (tid == 0) {
+            return true;
+        }
+        else {
+            BroadcastMessageToAll(content, 0, g_nickname, false, true, tid);
+            return true;
+        }
+    }
+    return false;
+}
+//--------------------------------------------------------------------------------------------------------
+//Chat with AI
+
+void ChatWithAI(std::string& content,int mode) {
+    if (!g_aiActive) {
+        g_aiActive = true;
+        if (g_network.type == ClientType::SERVER) {
+            if (mode == 0) {
+                if (SendNetworkMessage(content + " [@J-AI]")) {
+                    std::string reply = g_aiAgent.send(content);
+                    AddMessage("[AI]J-AI", reply, false);
+                    BroadcastMessageToAll(reply, 0, "J-AI");
+                }
+            }
+            else if (mode == 1)
+            {
+                std::string reply = g_aiAgent.send(content);
+                AddMessage("[AI]J-AI", reply, false);
+                BroadcastMessageToAll(reply, 0, "J-AI");
+            }
+        }
+        else if (g_network.type == ClientType::CLIENT)
+        {
+            if (SendNetworkMessage("!ai "+content)) {
+                std::string me = "[Me]" + std::string(g_nickname);
+                AddMessage(me, content + " [@J-AI]", true);
+            }
+            //std::string reply = g_aiAgent.send(content);
+        }
+        g_aiActive = false;
     }
 }
 
@@ -570,6 +687,13 @@ void HandleClient(ClientConnection* client) {
                     }
                     continue;
                 }
+            }
+            if (msg.substr(0, 4) == "!ai ") {
+                std::string msgToAI = msg.substr(4);
+                AddMessage("[Client][" + std::to_string(client->id) + "]" + client->name, msgToAI+" [@J-AI]", false);
+                BroadcastMessageToAll(msgToAI + " [@J-AI]", client->id, client->name);
+                ChatWithAI(msgToAI,1);
+                continue;
             }
 
             if (msg.substr(0, 6) == "!name ") {
@@ -858,59 +982,43 @@ void ReceiveThreadClient() {
             std::string sender;
             std::string content;
             bool isSystem = false;
-            if (msg.size() > 16) {
-                if (msg.substr(0, 15) == "[System]Welcome") {
-                    sender = "System";
-                    int secondOpen = msg.find('[', 15);
-                    int secondClose = msg.find(']', 15);
-                    if (secondOpen != std::string::npos && secondClose != std::string::npos) {
-                        g_network.myid = std::stoi(msg.substr(secondOpen + 1, secondClose));                     
-                    }       
-                    content = msg.substr(8);
-                    isSystem = true;
+            if (msg.substr(0, 15) == "[System]Welcome" && msg.size() > 16) {
+                sender = "System";
+                int secondOpen = msg.find('[', 15);
+                int secondClose = msg.find(']', 15);
+                if (secondOpen != std::string::npos && secondClose != std::string::npos) {
+                    g_network.myid = std::stoi(msg.substr(secondOpen + 1, secondClose));
                 }
-                else if (msg.substr(0, 8) == "[System]") {
-                    sender = "System";
-                    content = msg.substr(8);
-                    isSystem = true;
-                }
-                else if (msg.substr(0, 8) == "[Server]") {
-                    int colonPos = msg.find(':');
-                    if (colonPos != std::string::npos) {
-                        sender = msg.substr(0, colonPos);
-                        content = msg.substr(colonPos + 2);
-                    }
-                }
-                else if (msg.substr(0, 8) == "[Client]") {
-                    int colonPos = msg.find(':');
-                    if (colonPos != std::string::npos) {
-                        sender = msg.substr(8, colonPos-8);
-                        content = msg.substr(colonPos + 2);
-                    }
+                content = msg.substr(8);
+                isSystem = true;
+            }
+            else if (msg.substr(0, 8) == "[System]") {
+                sender = "System";
+                content = msg.substr(8);
+                isSystem = true;
+            }
+            else if (msg.substr(0, 8) == "[Server]") {
+                int colonPos = msg.find(':');
+                if (colonPos != std::string::npos) {
+                    sender = msg.substr(0, colonPos);
+                    content = msg.substr(colonPos + 2);
                 }
             }
-            else if (msg.size() > 8) {
-                if (msg.substr(0, 8) == "[System]") {
-                    sender = "System";
-                    content = msg.substr(8);
-                    isSystem = true;
+            else if (msg.substr(0, 4) == "[AI]") {
+                int colonPos = msg.find(':');
+                if (colonPos != std::string::npos) {
+                    sender = msg.substr(0, colonPos);
+                    content = msg.substr(colonPos + 2);
                 }
-                else if (msg.substr(0, 8) == "[Server]") {
-                    int colonPos = msg.find(':');
-                    if (colonPos != std::string::npos) {
-                        sender = msg.substr(0, colonPos);
-                        content = msg.substr(colonPos + 2);
-                    }
+            }
+            else if (msg.substr(0, 8) == "[Client]") {
+                int colonPos = msg.find(':');
+                if (colonPos != std::string::npos) {
+                    sender = msg.substr(8, colonPos - 8);
+                    content = msg.substr(colonPos + 2);
                 }
-                else if (msg.substr(0, 8) == "[Client]") {
-                    int colonPos = msg.find(':');
-                    if (colonPos != std::string::npos) {
-                        sender = msg.substr(8, colonPos-8);
-                        content = msg.substr(colonPos + 2);
-                    }
-                }
-            }            
-            else{
+            }
+            else {
                 int colonPos = msg.find(':');
                 if (colonPos != std::string::npos) {
                     sender = msg.substr(0, colonPos);
@@ -922,7 +1030,7 @@ void ReceiveThreadClient() {
                     isSystem = true;
                 }
             }
-
+          
             AddMessage(sender, content, false, isSystem);
 
         }
@@ -1020,43 +1128,6 @@ void Disconnect() {
     g_network.status = "Disconnected";
     g_network.type = ClientType::NONE;
     AddMessage("System", "Disconnected", false, true);
-}
-
-bool SendNetworkMessage(const std::string& content) {
-    if (!g_network.connected) return false;
-
-    if (g_network.type == ClientType::CLIENT) {        
-        return SendMsg(g_network.clientSocket, content);
-    }
-    else if (g_network.type == ClientType::SERVER) {
-        AddMessage("[Server]" + std::string(g_nickname), content, true);
-        BroadcastMessageToAll(content, 0, g_nickname);
-        return true;
-    }
-    return false;
-}
-
-bool SendPrivateMessage(const std::string& targetId, const std::string& content) {
-    if (!g_network.connected) return false;
-
-    int tid = 0;
-    tid = std::stoi(targetId);
-
-    std::string msg = "@[" + std::to_string(tid) + "]" + content;
-
-    if (g_network.type == ClientType::CLIENT) {
-        return SendMsg(g_network.clientSocket, msg);
-    }
-    else if (g_network.type == ClientType::SERVER) {
-        if (tid == 0) {
-            return true;
-        }
-        else {
-            BroadcastMessageToAll(content, 0, g_nickname, false, true, tid);
-            return true;
-        }
-    }
-    return false;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1289,7 +1360,7 @@ void DrawUI() {
                 ImVec4 color;
                 if (msg.isSystem) color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
                 else if (msg.isSelf) color = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);
-                else if (msg.sender.find("[Server]") != std::string::npos) color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+                else if (msg.sender.find("[AI]") != std::string::npos) color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
                 else color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
 
                 ImGui::TextColored(color, "[%s] %s: %s",
@@ -1317,8 +1388,11 @@ void DrawUI() {
 
     if ((enterPressed || btnClicked) && strlen(g_inputBuffer) > 0) {
         std::string msg(g_inputBuffer);
-
-        if (msg.substr(0, 6) == "!name ") {
+        if (msg.substr(0, 4) == "!ai "|| msg.substr(0, 4) == "!AI ") {
+            std::string msgToAI = msg.substr(4);
+            ChatWithAI(msgToAI,0);
+        }
+        else if (msg.substr(0, 6) == "!name ") {
             std::string newName = msg.substr(6);
             if (!newName.empty()) {
                 HandleNameChangeCommand(newName);
@@ -1340,7 +1414,7 @@ void DrawUI() {
     }
 
     ImGui::PopStyleVar();
-    ImGui::TextDisabled("Commands: !name <Nickname> = Change name | !list = Check user list | !quit = Exit");
+    ImGui::TextDisabled("Commands: !name <Nickname> = Change name |!ai = chat with AI | !list = Check user list | !quit = Exit");
 
     ImGui::End();
 
