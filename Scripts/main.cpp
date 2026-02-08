@@ -183,8 +183,20 @@ public:
 };
 
 //------------------------------------------------------------------------
+std::string getApiKey() {
+    char* buffer = nullptr;
+    size_t size = 0;
+    _dupenv_s(&buffer, &size, "GROQ_API_KEY");
+    std::string result;
+    if (buffer != nullptr) {
+        result = buffer;
+        free(buffer);
+    }
+    return result;
+}
+
 static std::atomic<bool> g_aiActive = { false };
-static std::string g_aiApiKey = "";
+static std::string g_aiApiKey = getApiKey();
 static std::string g_aiModel = "llama-3.3-70b-versatile";
 static GroqAI g_aiAgent(g_aiApiKey,g_aiModel);
 

@@ -28,14 +28,16 @@ public:
         );
 
         if (!hSession) {
-            throw std::runtime_error("WinHttpOpen failed, code: " + std::to_string(GetLastError()));
+            return "error";
+            //throw std::runtime_error("WinHttpOpen failed, code: " + std::to_string(GetLastError()));
         }
 
         HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(),
             INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (!hConnect) {
             WinHttpCloseHandle(hSession);
-            throw std::runtime_error("WinHttpConnect failed, code: " + std::to_string(GetLastError()));
+            return "error";
+            //throw std::runtime_error("WinHttpConnect failed, code: " + std::to_string(GetLastError()));
         }
 
         HINTERNET hRequest = WinHttpOpenRequest(
@@ -51,7 +53,8 @@ public:
         if (!hRequest) {
             WinHttpCloseHandle(hConnect);
             WinHttpCloseHandle(hSession);
-            throw std::runtime_error("WinHttpOpenRequest failed, code: " + std::to_string(GetLastError()));
+            return "error";
+            //throw std::runtime_error("WinHttpOpenRequest failed, code: " + std::to_string(GetLastError()));
         }
 
         int timeout = timeoutSeconds * 1000;
@@ -80,14 +83,16 @@ public:
         if (!result) {
             DWORD err = GetLastError();
             cleanup(hRequest, hConnect, hSession);
-            throw std::runtime_error("WinHttpSendRequest failed, code: " + std::to_string(err));
+            return "error";
+            //throw std::runtime_error("WinHttpSendRequest failed, code: " + std::to_string(err));
         }
 
         result = WinHttpReceiveResponse(hRequest, NULL);
         if (!result) {
             DWORD err = GetLastError();
             cleanup(hRequest, hConnect, hSession);
-            throw std::runtime_error("WinHttpReceiveResponse failed, code: " + std::to_string(err));
+            return "error";
+            //throw std::runtime_error("WinHttpReceiveResponse failed, code: " + std::to_string(err));
         }
 
         DWORD statusCode = 0;
@@ -112,7 +117,8 @@ public:
         cleanup(hRequest, hConnect, hSession);
 
         if (statusCode != 200) {
-            throw std::runtime_error("HTTP " + std::to_string(statusCode) + ": " + response);
+            return "error";
+            //throw std::runtime_error("HTTP " + std::to_string(statusCode) + ": " + response);
         }
 
         return response;
