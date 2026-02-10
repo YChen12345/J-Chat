@@ -1022,7 +1022,7 @@ void Disconnect() {
     AddMessage("System", "Disconnected", false, true);
 }
 
-bool SendNetworkMessage(const std::string& content) {
+bool SendPublicMessage(const std::string& content) {
     if (!g_network.connected) return false;
 
     if (g_network.type == ClientType::CLIENT) {        
@@ -1064,7 +1064,7 @@ bool SendPrivateMessage(const std::string& targetId, const std::string& content)
 
 ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
 
-void DrawUserListPanel(float width, float height) {
+void DrawUserListPanel_Server(float width, float height) {
     ImGui::BeginChild("UserList", ImVec2(width, height), true);
     ImGui::Text("Users:");
     ImGui::Separator();
@@ -1078,13 +1078,42 @@ void DrawUserListPanel(float width, float height) {
             users.push_back(std::make_pair(client->name, std::to_string(client->id)));
         }
     }
-    else if (g_network.type == ClientType::CLIENT && g_network.connected) {
+
+    for (int i = 0; i < users.size(); i++) {
+        const std::string& name = users[i].first;
+        const std::string& id = users[i].second;
+        bool isSelected = (g_selectedUserId == id);
+        std::string label = name + " [" + id + "]";
+
+        if (isSelected) {
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
+        }
+        if (ImGui::Selectable(label.c_str(), isSelected, ImGuiSelectableFlags_AllowDoubleClick)) {
+            g_selectedUserId = id;
+
+            //Double-click to open the private chat window
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                GetOrCreatePrivateChat(name, id);
+            }
+        }
+        if (isSelected) {
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::EndChild();
+}
+void DrawUserListPanel_Client(float width, float height) {
+    ImGui::BeginChild("UserList", ImVec2(width, height), true);
+    ImGui::Text("Users:");
+    ImGui::Separator();
+
+    std::vector<std::pair<std::string, std::string>> users;
+    if (g_network.connected) {
         std::lock_guard<std::mutex> lock(g_usersMutex);
         for (const auto& user : g_onlineUsers) {
             users.push_back(std::make_pair(user.name, user.id));
         }
     }
-
     for (int i = 0; i < users.size(); i++) {
         const std::string& name = users[i].first;
         const std::string& id = users[i].second;
@@ -1119,7 +1148,7 @@ void DrawPrivateChatWindows() {
         PrivateChatWindow& chat = it->second;
 
         auto user = std::find_if(g_onlineUsers.begin(), g_onlineUsers.end(),
-            [key](const OnlineUser& olu) { return std::stoi(olu.id) == key;});
+            [key](const OnlineUser& olu) { return std::stoi(olu.id) == key; });
         if (user == g_onlineUsers.end()) {
             toRemove.push_back(key);
             continue;
@@ -1169,7 +1198,7 @@ void DrawPrivateChatWindows() {
 
             if ((enterPressed || btnClicked) && strlen(chat.inputBuffer) > 0) {
                 std::string content(chat.inputBuffer);
-                if (std::stoi(chat.targetId)!= g_network.myid) {
+                if (std::stoi(chat.targetId) != g_network.myid) {
                     if (SendPrivateMessage(chat.targetId, content)) {
                         AddPrivateMessage(key, "[Me]" + std::string(g_nickname), content, true);
                     }
@@ -1197,7 +1226,115 @@ void DrawPrivateChatWindows() {
     }
 }
 
-void DrawUI() {
+void DrawMainPage_None() {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Appearing);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_MenuBar;
+
+    if (!ImGui::Begin("MainChatRoom", nullptr, flags)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginMenuBar()) {
+        ImGui::Text("JChat v1.0");
+        ImGui::EndMenuBar();
+    }
+
+    ImGui::BeginChild("ConnectionPanel", ImVec2(0, 105), true, ImGuiWindowFlags_NoScrollbar);
+
+    ImVec4 statusColor;
+    if (g_network.connected) statusColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+    else if (g_network.status.find("Waiting") != std::string::npos || g_network.status.find("Running") != std::string::npos)
+        statusColor = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);
+    else statusColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+
+    ImGui::TextColored(statusColor, "%s", g_network.status.c_str());
+    ImGui::Separator();
+
+    ImGui::InputText("Nickname", g_nickname, sizeof(g_nickname));
+    ImGui::InputText("Server IP", g_serverIP, sizeof(g_serverIP));
+    if (ImGui::Button("Connect", ImVec2(80, 20))) {
+        g_starting = true;
+        StartClient(g_serverIP);
+    }
+    ImGui::SameLine();
+    if (!g_starting) {
+        if (ImGui::Button("Host Server", ImVec2(80, 20))) {
+            StartServer();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("BGM", &g_hasBGM);
+    ImGui::SameLine();
+    ImGui::Checkbox("SoundEffect", &g_soundEffect);
+    ImGui::EndChild();
+
+    float userListWidth = 150.0f;
+    float spacing = 8.0f;
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("ChatArea", ImVec2(0, -40), true);
+    {
+        ImGui::BeginChild("ChatHistory", ImVec2(0, 0), false);
+        {
+            std::lock_guard<std::mutex> lock(g_msgMutex);
+            for (int i = 0; i < g_messages.size(); i++) {
+                const ChatMessage& msg = g_messages[i];
+                ImVec4 color;
+                if (msg.isSystem) color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
+                else if (msg.isSelf) color = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);
+                else color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
+
+                ImGui::TextColored(color, "[%s] %s: %s",
+                    msg.timestamp.c_str(), msg.sender.c_str(), msg.content.c_str());
+            }
+        }
+
+        if (g_scrollToBottom) {
+            ImGui::SetScrollHereY(1.0f);
+            g_scrollToBottom = false;
+        }
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+    float inputWidth = ImGui::GetContentRegionAvail().x - 55;
+    ImGui::SetNextItemWidth(inputWidth);
+
+    bool enterPressed = ImGui::InputText("##input", g_inputBuffer, sizeof(g_inputBuffer),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    bool btnClicked = ImGui::Button("Send", ImVec2(50, 0));
+
+    if ((enterPressed || btnClicked) && strlen(g_inputBuffer) > 0) {
+        std::string msg(g_inputBuffer);
+        if (msg.substr(0, 6) == "!name ") {
+            std::string newName = msg.substr(6);
+            if (!newName.empty()) {
+                HandleNameChangeCommand(newName);
+            }
+        }
+        else {
+            AddMessage("System", "Not connected", false, true);
+        }
+        g_inputBuffer[0] = '\0';
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+
+    ImGui::PopStyleVar();
+    ImGui::TextDisabled("Commands: !name <nickname> = Change name | !list = Check user list | !quit = Exit");
+    ImGui::End();
+    DrawPrivateChatWindows();
+}
+void DrawMainPage_Server() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Appearing);
@@ -1236,35 +1373,10 @@ void DrawUI() {
 
     if (g_network.connected || g_network.isRunning) {
         ImGui::Text("Mode: %s | Nickname: %s | ID: [%d]",
-            g_network.type == ClientType::SERVER ? "Server" : "Client",
-            g_nickname,g_network.myid);
-
-        if (g_network.type == ClientType::CLIENT) {
-            ImGui::SameLine();
-            ImGui::Text("| Server: %s", g_network.serverIP.c_str());
-        }
-
+            "Server", g_nickname, g_network.myid);
         if (ImGui::Button("Disconnect", ImVec2(80, 20))) {
             Disconnect();
         }
-        ImGui::SameLine();
-        ImGui::Checkbox("BGM", &g_hasBGM);
-        ImGui::SameLine();
-        ImGui::Checkbox("SoundEffect", &g_soundEffect);
-    }
-    else {
-        ImGui::InputText("Nickname", g_nickname, sizeof(g_nickname));
-        ImGui::InputText("Server IP", g_serverIP, sizeof(g_serverIP));
-        if (ImGui::Button("Connect", ImVec2(80, 20))) {
-            g_starting = true;
-            StartClient(g_serverIP);
-        }
-        ImGui::SameLine();
-        if (!g_starting) {
-            if (ImGui::Button("Host Server", ImVec2(80, 20))) {
-                StartServer();
-            }
-        }  
         ImGui::SameLine();
         ImGui::Checkbox("BGM", &g_hasBGM);
         ImGui::SameLine();
@@ -1275,7 +1387,7 @@ void DrawUI() {
     float userListWidth = 150.0f;
     float spacing = 8.0f;
 
-    DrawUserListPanel(userListWidth, -40);
+    DrawUserListPanel_Server(userListWidth, -40);
 
     ImGui::SameLine();
 
@@ -1289,7 +1401,6 @@ void DrawUI() {
                 ImVec4 color;
                 if (msg.isSystem) color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
                 else if (msg.isSelf) color = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);
-                else if (msg.sender.find("[Server]") != std::string::npos) color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
                 else color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
 
                 ImGui::TextColored(color, "[%s] %s: %s",
@@ -1317,7 +1428,6 @@ void DrawUI() {
 
     if ((enterPressed || btnClicked) && strlen(g_inputBuffer) > 0) {
         std::string msg(g_inputBuffer);
-
         if (msg.substr(0, 6) == "!name ") {
             std::string newName = msg.substr(6);
             if (!newName.empty()) {
@@ -1325,11 +1435,124 @@ void DrawUI() {
             }
         }
         else if (g_network.connected || g_network.isRunning) {
-            if (SendNetworkMessage(msg)) {
-                if (g_network.type == ClientType::CLIENT) {
-                    std::string me = "[Me]" + std::string(g_nickname);
-                    AddMessage(me, msg, true);
-                }
+            SendPublicMessage(msg);
+        }
+        else {
+            AddMessage("System", "Not connected", false, true);
+        }
+        g_inputBuffer[0] = '\0';
+        ImGui::SetKeyboardFocusHere(-1);
+    }
+
+    ImGui::PopStyleVar();
+    ImGui::TextDisabled("Commands: !name <nickname> = Change name | !list = Check user list | !quit = Exit");
+
+    ImGui::End();
+
+    DrawPrivateChatWindows();
+}
+void DrawMainPage_Client() {
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(viewport->WorkSize, ImGuiCond_Appearing);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_MenuBar;
+
+    if (!ImGui::Begin("MainChatRoom", nullptr, flags)) {
+        ImGui::End();
+        return;
+    }
+
+    if (ImGui::BeginMenuBar()) {
+        ImGui::Text("JChat v1.0");
+        ImGui::EndMenuBar();
+    }
+
+    ImGui::BeginChild("ConnectionPanel", ImVec2(0, 105), true, ImGuiWindowFlags_NoScrollbar);
+
+    ImVec4 statusColor;
+    if (g_network.connected) statusColor = ImVec4(0.0f, 1.0f, 0.0f, 1.0f);
+    else if (g_network.status.find("Waiting") != std::string::npos || g_network.status.find("Running") != std::string::npos)
+        statusColor = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);
+    else statusColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+
+    ImGui::TextColored(statusColor, "%s", g_network.status.c_str());
+
+    ImGui::Separator();
+
+    if (g_network.connected || g_network.isRunning) {
+        ImGui::Text("Mode: %s | Nickname: %s | ID: [%d]",
+            "Client", g_nickname, g_network.myid);
+
+        ImGui::SameLine();
+        ImGui::Text("| Server: %s", g_network.serverIP.c_str());
+
+        if (ImGui::Button("Disconnect", ImVec2(80, 20))) {
+            Disconnect();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("BGM", &g_hasBGM);
+        ImGui::SameLine();
+        ImGui::Checkbox("SoundEffect", &g_soundEffect);
+    }
+    ImGui::EndChild();
+
+    float userListWidth = 150.0f;
+    float spacing = 8.0f;
+
+    DrawUserListPanel_Client(userListWidth, -40);
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("ChatArea", ImVec2(0, -40), true);
+    {
+        ImGui::BeginChild("ChatHistory", ImVec2(0, 0), false);
+        {
+            std::lock_guard<std::mutex> lock(g_msgMutex);
+            for (int i = 0; i < g_messages.size(); i++) {
+                const ChatMessage& msg = g_messages[i];
+                ImVec4 color;
+                if (msg.isSystem) color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
+                else if (msg.isSelf) color = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);
+                else color = ImVec4(0.9f, 0.9f, 0.9f, 1.0f);
+
+                ImGui::TextColored(color, "[%s] %s: %s",
+                    msg.timestamp.c_str(), msg.sender.c_str(), msg.content.c_str());
+            }
+        }
+
+        if (g_scrollToBottom) {
+            ImGui::SetScrollHereY(1.0f);
+            g_scrollToBottom = false;
+        }
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+    float inputWidth = ImGui::GetContentRegionAvail().x - 55;
+    ImGui::SetNextItemWidth(inputWidth);
+
+    bool enterPressed = ImGui::InputText("##input", g_inputBuffer, sizeof(g_inputBuffer),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    bool btnClicked = ImGui::Button("Send", ImVec2(50, 0));
+
+    if ((enterPressed || btnClicked) && strlen(g_inputBuffer) > 0) {
+        std::string msg(g_inputBuffer);
+        if (msg.substr(0, 6) == "!name ") {
+            std::string newName = msg.substr(6);
+            if (!newName.empty()) {
+                HandleNameChangeCommand(newName);
+            }
+        }
+        else if (g_network.connected || g_network.isRunning) {
+            if (SendPublicMessage(msg)) {
+                std::string me = "[Me]" + std::string(g_nickname);
+                AddMessage(me, msg, true);
             }
         }
         else {
@@ -1340,11 +1563,25 @@ void DrawUI() {
     }
 
     ImGui::PopStyleVar();
-    ImGui::TextDisabled("Commands: !name <Nickname> = Change name | !list = Check user list | !quit = Exit");
+    ImGui::TextDisabled("Commands: !name <nickname> = Change name | !list = Check user list | !quit = Exit");
 
     ImGui::End();
 
     DrawPrivateChatWindows();
+}
+void DrawUI() {
+    if (g_network.type == ClientType::NONE)
+    {
+        DrawMainPage_None();
+    }
+    else if (g_network.type == ClientType::SERVER)
+    {
+        DrawMainPage_Server();
+    }
+    else if (g_network.type == ClientType::CLIENT)
+    {
+        DrawMainPage_Client();
+    }
 }
 
 //---------------------------------------------------------------------------------------------
